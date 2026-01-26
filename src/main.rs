@@ -25,6 +25,7 @@ fn main() -> Result<(), Error> {
     let run_config = RunConfig::new(ConvertCrosstermEx::new())?
         .poll(PollBlink::default())
         .poll(PollTimers::new())
+        .backends("*")
         .window_title("im");
 
     let theme = create_salsa_theme("EverForest Light");
