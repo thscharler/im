@@ -271,10 +271,14 @@ mod image {
                             Control::Continue
                         }
                     }),
-                    ct_event!(keycode press Up) | ct_event!(key press '+') => {
+                    ct_event!(keycode press Up)
+                    | ct_event!(keycode press Left)
+                    | ct_event!(key press '+') => {
                         event_flow!(next_img(state, ctx)?)
                     }
-                    ct_event!(keycode press Down) | ct_event!(key press '-') => {
+                    ct_event!(keycode press Down)
+                    | ct_event!(keycode press Right)
+                    | ct_event!(key press '-') => {
                         event_flow!(prev_img(state, ctx)?)
                     }
                     ct_event!(keycode press Media(media)) => match media {
@@ -286,9 +290,15 @@ mod image {
                         MediaKeyCode::RaiseVolume => event_flow!(inc_duration(state, ctx)?),
                         _ => {}
                     },
-                    ct_event!(keycode press F(4)) => event_flow!(dec_duration(state, ctx)?),
-                    ct_event!(keycode press F(5)) => event_flow!(play_pause(state, ctx)?),
-                    ct_event!(keycode press F(6)) => event_flow!(inc_duration(state, ctx)?),
+                    ct_event!(keycode press F(4)) | ct_event!(key press ALT-'-') => {
+                        event_flow!(dec_duration(state, ctx)?)
+                    }
+                    ct_event!(keycode press F(5)) | ct_event!(key press '*') => {
+                        event_flow!(play_pause(state, ctx)?)
+                    }
+                    ct_event!(keycode press F(6)) | ct_event!(key press ALT-'+') => {
+                        event_flow!(inc_duration(state, ctx)?)
+                    }
 
                     // todo: free drag
                     _ => {}
