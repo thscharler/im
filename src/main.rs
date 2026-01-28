@@ -5,6 +5,7 @@ use anyhow::Error;
 use crossterm::event::Event;
 use log::debug;
 use rat_salsa_wgpu::events::{CompositeWinitEvent, ConvertCrosstermEx};
+use rat_salsa_wgpu::image::ImageFit;
 use rat_salsa_wgpu::poll::{PollBlink, PollTimers};
 use rat_salsa_wgpu::timer::{TimeOut, TimerDef};
 use rat_salsa_wgpu::{Control, RunConfig, SalsaAppContext, SalsaContext, run_tui};
@@ -15,7 +16,7 @@ use rat_widget::focus::{FocusBuilder, FocusFlag, HasFocus, Navigation};
 use rat_widget::msgdialog::MsgDialogState;
 use rat_widget::text::{HasScreenCursor, TextStyle};
 use rat_widget::textarea::{TextArea, TextAreaState};
-use rat_widget::toolbar::ToolbarState;
+use rat_widget::toolbar::{Toolbar, ToolbarKeys, ToolbarOutcome, ToolbarState};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::Style;
@@ -104,16 +105,21 @@ impl From<CompositeWinitEvent> for ImEvent {
 
 #[derive(Debug, Default)]
 pub struct Scenery {
-    pub textoverlay: TextAreaState,
+    pub tools: ToolbarState,
+    pub text_overlay: TextAreaState,
     pub images: Images,
     pub error_dlg: MsgDialogState,
-    pub toolbar: ToolbarState,
 }
 
 impl HasFocus for Scenery {
     fn build(&self, builder: &mut FocusBuilder) {
         builder.widget(&self.images);
-        builder.widget_navigate(&self.textoverlay, Navigation::Regular);
+        builder.widget_with_flags(
+            self.text_overlay.focus.clone(),
+            Rect::default(),
+            0,
+            Navigation::Regular,
+        );
     }
 
     fn focus(&self) -> FocusFlag {
@@ -144,6 +150,25 @@ pub fn render(
     ctx.set_fg_color(style.fg.unwrap_or_default());
     buf.set_style(area, style);
 
+    let (tool, tool_popup) = Toolbar::new()
+        .styles(ctx.theme.style(WidgetStyle::TOOLBAR))
+        .button("Up", " \u{21E7} ", false)
+        .button("Dn", " \u{21E9} ", false)
+        .text("  ")
+        .button("F4", " -- ", false)
+        .button("F5", " \u{25B6} ", false)
+        .button("F6", " ++ ", false)
+        .text("  ")
+        .button("Del", " \u{2716} ", false)
+        .button("", " \u{2716}\u{2716} ", false)
+        .text("  ")
+        .button("0", " \u{2921}\u{2922} ", false)
+        .button("1..3", " \u{2194} ", false)
+        .button("4..6", " \u{2194}\u{2195} ", false)
+        .button("7..9", " \u{2195} ", false)
+        .into_widgets(l0[0], &mut state.tools);
+    tool.render(l0[0], buf, &mut state.tools);
+
     image::render(l0[1], buf, &mut state.images, ctx)?;
 
     let mut txt_style: TextStyle = ctx.theme.style(WidgetStyle::TEXTVIEW);
@@ -151,9 +176,11 @@ pub fn render(
     let txt_area = l0[1].inner(Margin::new(1, 1));
     TextArea::new()
         .styles(txt_style)
-        .render(txt_area, buf, &mut state.textoverlay);
+        .render(txt_area, buf, &mut state.text_overlay);
 
-    ctx.set_screen_cursor(state.textoverlay.screen_cursor());
+    tool_popup.render(l0[0], buf, &mut state.tools);
+
+    ctx.set_screen_cursor(state.text_overlay.screen_cursor());
 
     Ok(())
 }
@@ -174,9 +201,68 @@ pub fn event(
             _ => {}
         }
 
-        if state.textoverlay.is_focused() {
-            event_flow!(state.textoverlay.handle(event, Regular));
+        if state.text_overlay.is_focused() {
+            event_flow!(state.text_overlay.handle(event, Regular));
         }
+        let r = state.tools.handle(
+            event,
+            ToolbarKeys {
+                focus: &*ctx.focus(),
+                keys: [],
+            },
+        );
+        match r {
+            ToolbarOutcome::Pressed(0) => event_flow!({ image::prev_img(&mut state.images)? }),
+            ToolbarOutcome::Pressed(1) => event_flow!({ image::next_img(&mut state.images)? }),
+            ToolbarOutcome::Pressed(2) => {
+                event_flow!({ image::decr_duration(&mut state.images, ctx)? })
+            }
+            ToolbarOutcome::Pressed(3) => {
+                event_flow!({ image::play_pause(&mut state.images, ctx)? })
+            }
+            ToolbarOutcome::Pressed(4) => {
+                event_flow!({ image::incr_duration(&mut state.images, ctx)? })
+            }
+            ToolbarOutcome::Pressed(5) => event_flow!({ image::del_img(&mut state.images)? }),
+            ToolbarOutcome::Pressed(6) => {
+                event_flow!({ image::clear_img(&mut state.images, ctx)? })
+            }
+            ToolbarOutcome::Pressed(7) => {
+                event_flow!({ image::set_image_fit(&mut state.images, ImageFit::Fill)? })
+            }
+            ToolbarOutcome::Pressed(8) => event_flow!({
+                let f = match image::image_fit(&mut state.images) {
+                    None => ImageFit::HorizontalStart,
+                    Some(ImageFit::HorizontalStart) => ImageFit::HorizontalCenter,
+                    Some(ImageFit::HorizontalCenter) => ImageFit::HorizontalEnd,
+                    Some(ImageFit::HorizontalEnd) => ImageFit::HorizontalStart,
+                    Some(_) => ImageFit::HorizontalStart,
+                };
+                image::set_image_fit(&mut state.images, f)?
+            }),
+            ToolbarOutcome::Pressed(9) => event_flow!({
+                let f = match image::image_fit(&mut state.images) {
+                    None => ImageFit::FitStart,
+                    Some(ImageFit::FitStart) => ImageFit::FitCenter,
+                    Some(ImageFit::FitCenter) => ImageFit::FitEnd,
+                    Some(ImageFit::FitEnd) => ImageFit::FitStart,
+                    Some(_) => ImageFit::FitStart,
+                };
+                image::set_image_fit(&mut state.images, f)?
+            }),
+            ToolbarOutcome::Pressed(10) => event_flow!({
+                let f = match image::image_fit(&mut state.images) {
+                    None => ImageFit::VerticalStart,
+                    Some(ImageFit::VerticalStart) => ImageFit::VerticalCenter,
+                    Some(ImageFit::VerticalCenter) => ImageFit::VerticalEnd,
+                    Some(ImageFit::VerticalEnd) => ImageFit::VerticalStart,
+                    Some(_) => ImageFit::VerticalStart,
+                };
+                image::set_image_fit(&mut state.images, f)?
+            }),
+            r => event_flow!(r),
+        }
+
         if state.error_dlg.active() {
             event_flow!(state.error_dlg.handle(event, Dialog));
         }
@@ -261,7 +347,7 @@ mod image {
         let img_handle = &state.images[idx];
         let img_fit = state.fit[idx];
 
-        let px_area = img_buf.area_px();
+        let px_area = img_buf.rect_px(area);
         img_buf.render_px(
             img_handle,
             px_area,
@@ -288,9 +374,9 @@ mod image {
                 ct_event!(key press '4') => event_flow!(set_image_fit(state, FitStart)?),
                 ct_event!(key press '5') => event_flow!(set_image_fit(state, FitCenter)?),
                 ct_event!(key press '6') => event_flow!(set_image_fit(state, FitEnd)?),
-                ct_event!(key press '7') => event_flow!(set_image_fit(state, FitVerticalStart)?),
-                ct_event!(key press '8') => event_flow!(set_image_fit(state, FitVerticalCenter)?),
-                ct_event!(key press '9') => event_flow!(set_image_fit(state, FitVerticalEnd)?),
+                ct_event!(key press '7') => event_flow!(set_image_fit(state, VerticalStart)?),
+                ct_event!(key press '8') => event_flow!(set_image_fit(state, VerticalCenter)?),
+                ct_event!(key press '9') => event_flow!(set_image_fit(state, VerticalEnd)?),
 
                 ct_event!(keycode press Delete) => event_flow!(del_img(state)?),
 
@@ -374,13 +460,31 @@ mod image {
         Ok(Control::Continue)
     }
 
-    fn set_image_fit(state: &mut Images, fit: ImageFit) -> Result<Control<ImEvent>, Error> {
+    pub fn image_fit(state: &mut Images) -> Option<ImageFit> {
+        if let Some(idx) = state.idx {
+            Some(state.fit[idx])
+        } else {
+            None
+        }
+    }
+
+    pub fn set_image_fit(state: &mut Images, fit: ImageFit) -> Result<Control<ImEvent>, Error> {
         if let Some(idx) = state.idx {
             state.fit[idx] = fit;
             Ok(Control::Changed)
         } else {
             Ok(Control::Continue)
         }
+    }
+
+    pub fn clear_img(state: &mut Images, ctx: &mut GlobalState) -> Result<Control<ImEvent>, Error> {
+        state.images.clear();
+        state.fit.clear();
+        state.idx = None;
+        if let Some(timer) = state.timer.take() {
+            ctx.remove_timer(timer);
+        }
+        Ok(Control::Changed)
     }
 
     pub fn del_img(state: &mut Images) -> Result<Control<ImEvent>, Error> {
