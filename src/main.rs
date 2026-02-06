@@ -3,17 +3,18 @@
 use crate::image::Images;
 use anyhow::Error;
 use crossterm::event::Event;
-use log::debug;
+use log::error;
 use rat_salsa_wgpu::events::{CompositeWinitEvent, ConvertCrosstermEx};
 use rat_salsa_wgpu::image::ImageFit;
 use rat_salsa_wgpu::poll::{PollBlink, PollTimers};
-use rat_salsa_wgpu::timer::{TimeOut, TimerDef};
+use rat_salsa_wgpu::timer::TimeOut;
 use rat_salsa_wgpu::{Control, RunConfig, SalsaAppContext, SalsaContext, run_tui};
 use rat_theme4::theme::SalsaTheme;
 use rat_theme4::{StyleName, WidgetStyle, create_salsa_theme};
-use rat_widget::event::{Dialog, HandleEvent, Regular, ct_event, event_flow};
+use rat_widget::event::{Dialog, HandleEvent, Regular, TextOutcome, ct_event, event_flow};
 use rat_widget::focus::{FocusBuilder, FocusFlag, HasFocus, Navigation};
 use rat_widget::msgdialog::MsgDialogState;
+use rat_widget::text::clipboard::cli::setup_cli_clipboard;
 use rat_widget::text::{HasScreenCursor, TextStyle};
 use rat_widget::textarea::{TextArea, TextAreaState};
 use rat_widget::toolbar::{Toolbar, ToolbarKeys, ToolbarOutcome, ToolbarState};
@@ -27,6 +28,7 @@ use winit::event::WindowEvent;
 
 fn main() -> Result<(), Error> {
     setup_logging()?;
+    setup_cli_clipboard();
 
     let run_config = RunConfig::new(ConvertCrosstermEx::new())?
         .poll(PollBlink::default())
@@ -103,7 +105,7 @@ impl From<CompositeWinitEvent> for ImEvent {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Scenery {
     pub tools: ToolbarState,
     pub text_overlay: TextAreaState,
@@ -111,15 +113,21 @@ pub struct Scenery {
     pub error_dlg: MsgDialogState,
 }
 
+impl Default for Scenery {
+    fn default() -> Self {
+        Self {
+            tools: Default::default(),
+            text_overlay: TextAreaState::named("text"),
+            images: Images::named("images"),
+            error_dlg: Default::default(),
+        }
+    }
+}
+
 impl HasFocus for Scenery {
     fn build(&self, builder: &mut FocusBuilder) {
+        builder.widget_navigate(&self.text_overlay, Navigation::Regular);
         builder.widget(&self.images);
-        builder.widget_with_flags(
-            self.text_overlay.focus.clone(),
-            Rect::default(),
-            0,
-            Navigation::Regular,
-        );
     }
 
     fn focus(&self) -> FocusFlag {
@@ -152,20 +160,21 @@ pub fn render(
 
     let (tool, tool_popup) = Toolbar::new()
         .styles(ctx.theme.style(WidgetStyle::TOOLBAR))
-        .button("Up", " \u{21E7} ", false)
-        .button("Dn", " \u{21E9} ", false)
+        .button("", " \u{21E7} ", false)
+        .button("", " \u{21E9} ", false)
+        .button("", " T ", false)
         .text("  ")
-        .button("F4", " -- ", false)
-        .button("F5", " \u{25B6} ", false)
-        .button("F6", " ++ ", false)
+        .button("", " -- ", false)
+        .button("", " \u{25B6} ", false)
+        .button("", " ++ ", false)
         .text("  ")
-        .button("Del", " \u{2716} ", false)
+        .button("", " \u{2716} ", false)
         .button("", " \u{2716}\u{2716} ", false)
         .text("  ")
-        .button("0", " \u{2921}\u{2922} ", false)
-        .button("1..3", " \u{2194} ", false)
-        .button("4..6", " \u{2194}\u{2195} ", false)
-        .button("7..9", " \u{2195} ", false)
+        .button("", " \u{2921}\u{2922} ", false)
+        .button("", " \u{2194} ", false)
+        .button("", " \u{2194}\u{2195} ", false)
+        .button("", " \u{2195} ", false)
         .into_widgets(l0[0], &mut state.tools);
     tool.render(l0[0], buf, &mut state.tools);
 
@@ -191,19 +200,29 @@ pub fn event(
     ctx: &mut GlobalState,
 ) -> Result<Control<ImEvent>, Error> {
     if let ImEvent::Event(event) = event {
-        ctx.set_focus(FocusBuilder::rebuild_for(state, ctx.take_focus()));
-        ctx.focus().enable_log();
-        ctx.handle_focus(event);
-
         match event {
             ct_event!(resized) => event_flow!(Control::Changed),
             ct_event!(key press CONTROL-'q') => event_flow!(Control::Quit),
+            ct_event!(keycode press F(1)) => event_flow!(flip_text(state, ctx)?),
             _ => {}
         }
 
         if state.text_overlay.is_focused() {
-            event_flow!(state.text_overlay.handle(event, Regular));
+            event_flow!(match state.text_overlay.handle(event, Regular) {
+                TextOutcome::TextChanged => {
+                    let txt = state.text_overlay.value();
+                    state.images.set_text(txt.clone());
+                    if !txt.is_empty() {
+                        if let Some(txt_file) = state.images.text_file() {
+                            _ = fs::write(txt_file, txt);
+                        }
+                    }
+                    TextOutcome::TextChanged
+                }
+                r => r,
+            });
         }
+
         let r = state.tools.handle(
             event,
             ToolbarKeys {
@@ -212,53 +231,54 @@ pub fn event(
             },
         );
         match r {
-            ToolbarOutcome::Pressed(0) => event_flow!({ image::prev_img(&mut state.images)? }),
-            ToolbarOutcome::Pressed(1) => event_flow!({ image::next_img(&mut state.images)? }),
-            ToolbarOutcome::Pressed(2) => {
-                event_flow!({ image::decr_duration(&mut state.images, ctx)? })
-            }
+            ToolbarOutcome::Pressed(0) => event_flow!({ state.images.prev_img()? }),
+            ToolbarOutcome::Pressed(1) => event_flow!({ state.images.next_img()? }),
+            ToolbarOutcome::Pressed(2) => event_flow!({ flip_text(state, ctx)? }),
             ToolbarOutcome::Pressed(3) => {
-                event_flow!({ image::play_pause(&mut state.images, ctx)? })
+                event_flow!({ state.images.decr_duration(ctx)? })
             }
             ToolbarOutcome::Pressed(4) => {
-                event_flow!({ image::incr_duration(&mut state.images, ctx)? })
+                event_flow!({ state.images.play_pause(ctx)? })
             }
-            ToolbarOutcome::Pressed(5) => event_flow!({ image::del_img(&mut state.images)? }),
-            ToolbarOutcome::Pressed(6) => {
-                event_flow!({ image::clear_img(&mut state.images, ctx)? })
+            ToolbarOutcome::Pressed(5) => {
+                event_flow!({ state.images.incr_duration(ctx)? })
             }
+            ToolbarOutcome::Pressed(6) => event_flow!({ state.images.del_img()? }),
             ToolbarOutcome::Pressed(7) => {
-                event_flow!({ image::set_image_fit(&mut state.images, ImageFit::Fill)? })
+                event_flow!({ state.images.clear_img(ctx)? })
             }
-            ToolbarOutcome::Pressed(8) => event_flow!({
-                let f = match image::image_fit(&mut state.images) {
+            ToolbarOutcome::Pressed(8) => {
+                event_flow!({ state.images.set_image_fit(ImageFit::Fill)? })
+            }
+            ToolbarOutcome::Pressed(9) => event_flow!({
+                let f = match state.images.image_fit() {
                     None => ImageFit::HorizontalStart,
                     Some(ImageFit::HorizontalStart) => ImageFit::HorizontalCenter,
                     Some(ImageFit::HorizontalCenter) => ImageFit::HorizontalEnd,
                     Some(ImageFit::HorizontalEnd) => ImageFit::HorizontalStart,
                     Some(_) => ImageFit::HorizontalStart,
                 };
-                image::set_image_fit(&mut state.images, f)?
+                state.images.set_image_fit(f)?
             }),
-            ToolbarOutcome::Pressed(9) => event_flow!({
-                let f = match image::image_fit(&mut state.images) {
+            ToolbarOutcome::Pressed(10) => event_flow!({
+                let f = match state.images.image_fit() {
                     None => ImageFit::FitStart,
                     Some(ImageFit::FitStart) => ImageFit::FitCenter,
                     Some(ImageFit::FitCenter) => ImageFit::FitEnd,
                     Some(ImageFit::FitEnd) => ImageFit::FitStart,
                     Some(_) => ImageFit::FitStart,
                 };
-                image::set_image_fit(&mut state.images, f)?
+                state.images.set_image_fit(f)?
             }),
-            ToolbarOutcome::Pressed(10) => event_flow!({
-                let f = match image::image_fit(&mut state.images) {
+            ToolbarOutcome::Pressed(11) => event_flow!({
+                let f = match state.images.image_fit() {
                     None => ImageFit::VerticalStart,
                     Some(ImageFit::VerticalStart) => ImageFit::VerticalCenter,
                     Some(ImageFit::VerticalCenter) => ImageFit::VerticalEnd,
                     Some(ImageFit::VerticalEnd) => ImageFit::VerticalStart,
                     Some(_) => ImageFit::VerticalStart,
                 };
-                image::set_image_fit(&mut state.images, f)?
+                state.images.set_image_fit(f)?
             }),
             r => event_flow!(r),
         }
@@ -271,7 +291,6 @@ pub fn event(
     if let ImEvent::Winit(winit) = event {
         match &winit.event {
             WindowEvent::DroppedFile(f) => {
-                debug!("dropped {:?}", f);
                 event_flow!(Control::Event(ImEvent::AddImage(f.clone())))
             }
             WindowEvent::HoveredFile(_f) => event_flow!({ Control::Continue }),
@@ -280,9 +299,24 @@ pub fn event(
         }
     }
 
-    event_flow!(image::event(event, &mut state.images, ctx)?);
+    event_flow!(match image::event(event, &mut state.images, ctx)? {
+        Control::Changed => {
+            state.text_overlay.set_text(state.images.text());
+            Control::Changed
+        }
+        r => r,
+    });
 
     Ok(Control::Continue)
+}
+
+fn flip_text(state: &mut Scenery, ctx: &mut GlobalState) -> Result<Control<ImEvent>, Error> {
+    if !state.text_overlay.is_focused() {
+        ctx.focus().focus(&state.text_overlay);
+    } else {
+        ctx.focus().focus(&state.images);
+    }
+    Ok(Control::Changed)
 }
 
 mod image {
@@ -297,6 +331,8 @@ mod image {
     use rat_widget::focus::{FocusBuilder, FocusFlag, HasFocus};
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
+    use std::fs::read_to_string;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     #[derive(Debug, Default)]
@@ -305,11 +341,29 @@ mod image {
 
         idx: Option<usize>,
         images: Vec<ImageHandle>,
+        text_file: Vec<PathBuf>,
+        text: Vec<String>,
         fit: Vec<ImageFit>,
         timer: Option<TimerHandle>,
         timer_duration: Duration,
 
         focus: FocusFlag,
+    }
+
+    impl Images {
+        pub fn named(name: &str) -> Self {
+            Self {
+                area: Default::default(),
+                idx: Default::default(),
+                images: Default::default(),
+                text_file: Default::default(),
+                text: Default::default(),
+                fit: Default::default(),
+                timer: Default::default(),
+                timer_duration: Default::default(),
+                focus: FocusFlag::new().with_name(name),
+            }
+        }
     }
 
     impl HasFocus for Images {
@@ -367,46 +421,46 @@ mod image {
         {
             use ImageFit::*;
             match event {
-                ct_event!(key press '0') => event_flow!(set_image_fit(state, Fill)?),
-                ct_event!(key press '1') => event_flow!(set_image_fit(state, HorizontalStart)?),
-                ct_event!(key press '2') => event_flow!(set_image_fit(state, HorizontalCenter)?),
-                ct_event!(key press '3') => event_flow!(set_image_fit(state, HorizontalEnd)?),
-                ct_event!(key press '4') => event_flow!(set_image_fit(state, FitStart)?),
-                ct_event!(key press '5') => event_flow!(set_image_fit(state, FitCenter)?),
-                ct_event!(key press '6') => event_flow!(set_image_fit(state, FitEnd)?),
-                ct_event!(key press '7') => event_flow!(set_image_fit(state, VerticalStart)?),
-                ct_event!(key press '8') => event_flow!(set_image_fit(state, VerticalCenter)?),
-                ct_event!(key press '9') => event_flow!(set_image_fit(state, VerticalEnd)?),
+                ct_event!(key press '0') => event_flow!(state.set_image_fit(Fill)?),
+                ct_event!(key press '1') => event_flow!(state.set_image_fit(HorizontalStart)?),
+                ct_event!(key press '2') => event_flow!(state.set_image_fit(HorizontalCenter)?),
+                ct_event!(key press '3') => event_flow!(state.set_image_fit(HorizontalEnd)?),
+                ct_event!(key press '4') => event_flow!(state.set_image_fit(FitStart)?),
+                ct_event!(key press '5') => event_flow!(state.set_image_fit(FitCenter)?),
+                ct_event!(key press '6') => event_flow!(state.set_image_fit(FitEnd)?),
+                ct_event!(key press '7') => event_flow!(state.set_image_fit(VerticalStart)?),
+                ct_event!(key press '8') => event_flow!(state.set_image_fit(VerticalCenter)?),
+                ct_event!(key press '9') => event_flow!(state.set_image_fit(VerticalEnd)?),
 
-                ct_event!(keycode press Delete) => event_flow!(del_img(state)?),
+                ct_event!(keycode press Delete) => event_flow!(state.del_img()?),
 
                 ct_event!(keycode press Up)
                 | ct_event!(keycode press Left)
-                | ct_event!(key press '+') => event_flow!(next_img(state,)?),
+                | ct_event!(key press '+') => event_flow!(state.next_img()?),
 
                 ct_event!(keycode press Down)
                 | ct_event!(keycode press Right)
-                | ct_event!(key press '-') => event_flow!(prev_img(state,)?),
+                | ct_event!(key press '-') => event_flow!(state.prev_img()?),
 
-                ct_event!(scroll down) => event_flow!(next_img(state,)?),
-                ct_event!(scroll up) => event_flow!(prev_img(state,)?),
+                ct_event!(scroll down) => event_flow!(state.next_img()?),
+                ct_event!(scroll up) => event_flow!(state.prev_img()?),
                 ct_event!(keycode press Media(media)) => match media {
-                    MediaKeyCode::Play => event_flow!(play(state, ctx)?),
-                    MediaKeyCode::Pause => event_flow!(pause(state, ctx)?),
-                    MediaKeyCode::PlayPause => event_flow!(play_pause(state, ctx)?),
-                    MediaKeyCode::Stop => event_flow!(pause(state, ctx)?),
-                    MediaKeyCode::LowerVolume => event_flow!(decr_duration(state, ctx)?),
-                    MediaKeyCode::RaiseVolume => event_flow!(incr_duration(state, ctx)?),
+                    MediaKeyCode::Play => event_flow!(state.play(ctx)?),
+                    MediaKeyCode::Pause => event_flow!(state.pause(ctx)?),
+                    MediaKeyCode::PlayPause => event_flow!(state.play_pause(ctx)?),
+                    MediaKeyCode::Stop => event_flow!(state.pause(ctx)?),
+                    MediaKeyCode::LowerVolume => event_flow!(state.decr_duration(ctx)?),
+                    MediaKeyCode::RaiseVolume => event_flow!(state.incr_duration(ctx)?),
                     _ => {}
                 },
                 ct_event!(keycode press F(4)) | ct_event!(key press ALT-'-') => {
-                    event_flow!(decr_duration(state, ctx)?)
+                    event_flow!(state.decr_duration(ctx)?)
                 }
                 ct_event!(keycode press F(5)) | ct_event!(key press '*') => {
-                    event_flow!(play_pause(state, ctx)?)
+                    event_flow!(state.play_pause(ctx)?)
                 }
                 ct_event!(keycode press F(6)) | ct_event!(key press ALT-'+') => {
-                    event_flow!(incr_duration(state, ctx)?)
+                    event_flow!(state.incr_duration(ctx)?)
                 }
 
                 // todo: free drag
@@ -415,6 +469,51 @@ mod image {
         }
 
         if let ImEvent::AddImage(im) = event {
+            event_flow!(state.add_img(im, ctx)?)
+        }
+
+        if let ImEvent::TimeOut(t) = event {
+            if state.timer == Some(t.handle) {
+                event_flow!(state.next_img()?);
+            }
+        }
+
+        Ok(Control::Continue)
+    }
+
+    impl Images {
+        pub fn text(&self) -> &str {
+            if let Some(idx) = self.idx {
+                &self.text[idx]
+            } else {
+                ""
+            }
+        }
+
+        pub fn set_text(&mut self, txt: String) {
+            if let Some(idx) = self.idx {
+                self.text[idx] = txt;
+            } else {
+                // noop
+            }
+        }
+
+        pub fn text_file(&self) -> Option<&Path> {
+            if let Some(idx) = self.idx {
+                Some(&self.text_file[idx])
+            } else {
+                None
+            }
+        }
+
+        pub fn add_img(
+            &mut self,
+            im: &Path,
+            ctx: &mut GlobalState,
+        ) -> Result<Control<ImEvent>, Error> {
+            let txt_path = im.with_extension(".txt");
+            let txt_str = read_to_string(&txt_path).unwrap_or_default();
+
             let image = ImageReader::open(im)?;
             let image = image.decode()?;
             let rgba = image.to_rgba8();
@@ -428,173 +527,166 @@ mod image {
                 h as u32,
             );
 
-            match state.idx {
+            match self.idx {
                 None => {
-                    state.images.push(h_img);
-                    state.fit.push(ImageFit::FitCenter);
-                    state.idx = Some(0);
+                    self.images.push(h_img);
+                    self.text.push(txt_str);
+                    self.text_file.push(txt_path);
+                    self.fit.push(ImageFit::FitCenter);
+                    self.idx = Some(0);
                 }
-                Some(idx) if idx + 1 < state.images.len() => {
-                    let fit = state.fit[idx];
-                    state.images.insert(idx + 1, h_img);
-                    state.fit.insert(idx + 1, fit);
-                    state.idx = Some(idx + 1);
+                Some(idx) if idx + 1 < self.images.len() => {
+                    let fit = self.fit[idx];
+                    self.images.insert(idx + 1, h_img);
+                    self.text.insert(idx + 1, txt_str);
+                    self.text_file.insert(idx + 1, txt_path);
+                    self.fit.insert(idx + 1, fit);
+                    self.idx = Some(idx + 1);
                 }
                 Some(idx) => {
-                    let fit = state.fit[idx];
-                    state.images.push(h_img);
-                    state.fit.push(fit);
-                    state.idx = Some(state.images.len() - 1);
+                    let fit = self.fit[idx];
+                    self.images.push(h_img);
+                    self.text.push(txt_str);
+                    self.text_file.push(txt_path);
+                    self.fit.push(fit);
+                    self.idx = Some(self.images.len() - 1);
                 }
             }
 
-            event_flow!(Control::Changed);
-        }
-
-        if let ImEvent::TimeOut(t) = event {
-            if state.timer == Some(t.handle) {
-                event_flow!(next_img(state,)?);
-            }
-        }
-
-        Ok(Control::Continue)
-    }
-
-    pub fn image_fit(state: &mut Images) -> Option<ImageFit> {
-        if let Some(idx) = state.idx {
-            Some(state.fit[idx])
-        } else {
-            None
-        }
-    }
-
-    pub fn set_image_fit(state: &mut Images, fit: ImageFit) -> Result<Control<ImEvent>, Error> {
-        if let Some(idx) = state.idx {
-            state.fit[idx] = fit;
             Ok(Control::Changed)
-        } else {
-            Ok(Control::Continue)
         }
-    }
 
-    pub fn clear_img(state: &mut Images, ctx: &mut GlobalState) -> Result<Control<ImEvent>, Error> {
-        state.images.clear();
-        state.fit.clear();
-        state.idx = None;
-        if let Some(timer) = state.timer.take() {
-            ctx.remove_timer(timer);
-        }
-        Ok(Control::Changed)
-    }
-
-    pub fn del_img(state: &mut Images) -> Result<Control<ImEvent>, Error> {
-        if let Some(idx) = state.idx {
-            state.fit.remove(idx);
-            state.images.remove(idx);
-            if state.images.len() == 0 {
-                state.idx = None;
-            } else if idx >= state.images.len() {
-                state.idx = Some(state.images.len() - 1);
+        pub fn clear_img(&mut self, ctx: &mut GlobalState) -> Result<Control<ImEvent>, Error> {
+            self.images.clear();
+            self.text.clear();
+            self.text_file.clear();
+            self.fit.clear();
+            self.idx = None;
+            if let Some(timer) = self.timer.take() {
+                ctx.remove_timer(timer);
             }
             Ok(Control::Changed)
-        } else {
+        }
+
+        pub fn del_img(&mut self) -> Result<Control<ImEvent>, Error> {
+            if let Some(idx) = self.idx {
+                self.fit.remove(idx);
+                self.text.remove(idx);
+                self.text_file.remove(idx);
+                self.images.remove(idx);
+                if self.images.len() == 0 {
+                    self.idx = None;
+                } else if idx >= self.images.len() {
+                    self.idx = Some(self.images.len() - 1);
+                }
+                Ok(Control::Changed)
+            } else {
+                Ok(Control::Continue)
+            }
+        }
+
+        pub fn image_fit(&mut self) -> Option<ImageFit> {
+            if let Some(idx) = self.idx {
+                Some(self.fit[idx])
+            } else {
+                None
+            }
+        }
+
+        pub fn set_image_fit(&mut self, fit: ImageFit) -> Result<Control<ImEvent>, Error> {
+            if let Some(idx) = self.idx {
+                self.fit[idx] = fit;
+                Ok(Control::Changed)
+            } else {
+                Ok(Control::Continue)
+            }
+        }
+
+        pub fn prev_img(&mut self) -> Result<Control<ImEvent>, Error> {
+            match &mut self.idx {
+                None => Ok(Control::Continue),
+                Some(idx) => {
+                    if *idx > 0 {
+                        *idx -= 1;
+                    } else {
+                        *idx = self.images.len() - 1;
+                    }
+                    Ok(Control::Changed)
+                }
+            }
+        }
+
+        pub fn next_img(&mut self) -> Result<Control<ImEvent>, Error> {
+            match &mut self.idx {
+                None => Ok(Control::Continue),
+                Some(idx) => {
+                    *idx += 1;
+                    if *idx >= self.images.len() {
+                        *idx = 0;
+                    }
+                    Ok(Control::Changed)
+                }
+            }
+        }
+
+        pub fn incr_duration(&mut self, ctx: &mut GlobalState) -> Result<Control<ImEvent>, Error> {
+            if self.timer_duration.as_millis() > 1000 {
+                self.timer_duration = self.timer_duration + Duration::from_millis(500);
+            } else {
+                self.timer_duration = self.timer_duration + Duration::from_millis(100);
+            }
+
+            if self.timer.is_some() {
+                self.timer = Some(ctx.replace_timer(
+                    self.timer,
+                    TimerDef::new().timer(self.timer_duration).repeat_forever(),
+                ));
+            }
+
             Ok(Control::Continue)
         }
-    }
 
-    pub fn prev_img(state: &mut Images) -> Result<Control<ImEvent>, Error> {
-        match &mut state.idx {
-            None => Ok(Control::Continue),
-            Some(idx) => {
-                if *idx > 0 {
-                    *idx -= 1;
-                } else {
-                    *idx = state.images.len() - 1;
-                }
-                Ok(Control::Changed)
+        pub fn decr_duration(&mut self, ctx: &mut GlobalState) -> Result<Control<ImEvent>, Error> {
+            if self.timer_duration.as_millis() > 1000 {
+                self.timer_duration = self.timer_duration - Duration::from_millis(500);
+            } else if self.timer_duration.as_millis() > 100 {
+                self.timer_duration = self.timer_duration - Duration::from_millis(100);
+            } else {
+                // noop
+            }
+
+            if self.timer.is_some() {
+                self.timer = Some(ctx.replace_timer(
+                    self.timer,
+                    TimerDef::new().timer(self.timer_duration).repeat_forever(),
+                ));
+            }
+
+            Ok(Control::Changed)
+        }
+
+        pub fn play_pause(&mut self, ctx: &mut GlobalState) -> Result<Control<ImEvent>, Error> {
+            if self.timer.is_some() {
+                self.pause(ctx)
+            } else {
+                self.play(ctx)
             }
         }
-    }
 
-    pub fn next_img(state: &mut Images) -> Result<Control<ImEvent>, Error> {
-        match &mut state.idx {
-            None => Ok(Control::Continue),
-            Some(idx) => {
-                *idx += 1;
-                if *idx >= state.images.len() {
-                    *idx = 0;
-                }
-                Ok(Control::Changed)
+        pub fn play(&mut self, ctx: &mut GlobalState) -> Result<Control<ImEvent>, Error> {
+            self.timer = Some(ctx.replace_timer(
+                self.timer,
+                TimerDef::new().timer(self.timer_duration).repeat_forever(),
+            ));
+            Ok(Control::Changed)
+        }
+
+        pub fn pause(&mut self, ctx: &mut GlobalState) -> Result<Control<ImEvent>, Error> {
+            if let Some(timer) = self.timer {
+                ctx.remove_timer(timer);
             }
+            Ok(Control::Changed)
         }
-    }
-
-    pub fn incr_duration(
-        state: &mut Images,
-        ctx: &mut GlobalState,
-    ) -> Result<Control<ImEvent>, Error> {
-        if state.timer_duration.as_millis() > 1000 {
-            state.timer_duration = state.timer_duration + Duration::from_millis(1000);
-        } else {
-            state.timer_duration = state.timer_duration + Duration::from_millis(100);
-        }
-
-        if state.timer.is_some() {
-            state.timer = Some(ctx.replace_timer(
-                state.timer,
-                TimerDef::new().timer(state.timer_duration).repeat_forever(),
-            ));
-        }
-
-        Ok(Control::Continue)
-    }
-
-    pub fn decr_duration(
-        state: &mut Images,
-        ctx: &mut GlobalState,
-    ) -> Result<Control<ImEvent>, Error> {
-        if state.timer_duration.as_millis() > 1000 {
-            state.timer_duration = state.timer_duration - Duration::from_millis(1000);
-        } else if state.timer_duration.as_millis() > 100 {
-            state.timer_duration = state.timer_duration - Duration::from_millis(100);
-        } else {
-            // noop
-        }
-
-        if state.timer.is_some() {
-            state.timer = Some(ctx.replace_timer(
-                state.timer,
-                TimerDef::new().timer(state.timer_duration).repeat_forever(),
-            ));
-        }
-
-        Ok(Control::Changed)
-    }
-
-    pub fn play_pause(
-        state: &mut Images,
-        ctx: &mut GlobalState,
-    ) -> Result<Control<ImEvent>, Error> {
-        if state.timer.is_some() {
-            pause(state, ctx)
-        } else {
-            play(state, ctx)
-        }
-    }
-
-    pub fn play(state: &mut Images, ctx: &mut GlobalState) -> Result<Control<ImEvent>, Error> {
-        state.timer = Some(ctx.replace_timer(
-            state.timer,
-            TimerDef::new().timer(state.timer_duration).repeat_forever(),
-        ));
-        Ok(Control::Changed)
-    }
-
-    pub fn pause(state: &mut Images, ctx: &mut GlobalState) -> Result<Control<ImEvent>, Error> {
-        if let Some(timer) = state.timer {
-            ctx.remove_timer(timer);
-        }
-        Ok(Control::Changed)
     }
 }
 
@@ -603,7 +695,7 @@ pub fn error(
     state: &mut Scenery,
     _ctx: &mut GlobalState,
 ) -> Result<Control<ImEvent>, Error> {
-    debug!("ERROR {:#?}", event);
+    error!("ERROR {:#?}", event);
     state.error_dlg.append(format!("{:?}", &*event).as_str());
     Ok(Control::Changed)
 }
