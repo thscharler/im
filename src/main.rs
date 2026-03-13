@@ -1,12 +1,14 @@
 // #![windows_subsystem = "windows"]
 
 use crate::image::Images;
+use ::image::imageops::{FilterType, resize};
+use ::image::{ImageReader, RgbaImage};
 use anyhow::Error;
 use crossterm::event::Event;
 use log::error;
 use rat_salsa_wgpu::events::{CompositeWinitEvent, ConvertCrosstermEx};
 use rat_salsa_wgpu::image::ImageFit;
-use rat_salsa_wgpu::poll::{PollBlink, PollTimers};
+use rat_salsa_wgpu::poll::{PollBlink, PollTasks, PollTimers};
 use rat_salsa_wgpu::timer::TimeOut;
 use rat_salsa_wgpu::{Control, RunConfig, SalsaAppContext, SalsaContext, run_tui};
 use rat_theme4::theme::SalsaTheme;
@@ -22,8 +24,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::StatefulWidget;
+use std::cell::Cell;
 use std::fs;
-use std::path::PathBuf;
+use std::fs::read_to_string;
+use std::path::{Path, PathBuf};
 use winit::event::WindowEvent;
 
 fn main() -> Result<(), Error> {
@@ -33,6 +37,7 @@ fn main() -> Result<(), Error> {
     let run_config = RunConfig::new(ConvertCrosstermEx::new())?
         .poll(PollBlink::default())
         .poll(PollTimers::new())
+        .poll(PollTasks::new(2))
         .backends("*")
         .window_title("im");
 
@@ -78,12 +83,11 @@ impl GlobalState {
     }
 }
 
-#[derive(Debug)]
 pub enum ImEvent {
     Noop,
     Event(Event),
     Winit(CompositeWinitEvent),
-    AddImage(PathBuf),
+    AddImage(Cell<(String, PathBuf, RgbaImage)>),
     TimeOut(TimeOut),
 }
 
@@ -126,8 +130,8 @@ impl Default for Scenery {
 
 impl HasFocus for Scenery {
     fn build(&self, builder: &mut FocusBuilder) {
-        builder.widget_navigate(&self.text_overlay, Navigation::Regular);
         builder.widget(&self.images);
+        builder.widget_navigate(&self.text_overlay, Navigation::Regular);
     }
 
     fn focus(&self) -> FocusFlag {
@@ -141,7 +145,10 @@ impl HasFocus for Scenery {
 
 pub fn init(state: &mut Scenery, ctx: &mut GlobalState) -> Result<(), Error> {
     ctx.set_focus(FocusBuilder::build_for(state));
+    ctx.focus().first();
+
     image::init(&mut state.images, ctx)?;
+
     Ok(())
 }
 
@@ -291,7 +298,7 @@ pub fn event(
     if let ImEvent::Winit(winit) = event {
         match &winit.event {
             WindowEvent::DroppedFile(f) => {
-                event_flow!(Control::Event(ImEvent::AddImage(f.clone())))
+                event_flow!(load_image(f, ctx)?)
             }
             WindowEvent::HoveredFile(_f) => event_flow!({ Control::Continue }),
             WindowEvent::HoveredFileCancelled => event_flow!({ Control::Continue }),
@@ -310,6 +317,32 @@ pub fn event(
     Ok(Control::Continue)
 }
 
+fn load_image(im: &Path, ctx: &mut GlobalState) -> Result<Control<ImEvent>, Error> {
+    let im = im.to_path_buf();
+    ctx.spawn(move || {
+        let txt_path = im.with_extension(".txt");
+        let txt_str = read_to_string(&txt_path).unwrap_or_default();
+
+        let image = ImageReader::open(im)?;
+        let mut image = image.decode()?.to_rgba8();
+        if image.width() * image.height() > 1_000_000 {
+            let (w, h) = if image.width() > image.height() {
+                (1024, (1024 * image.height()) / image.width())
+            } else {
+                ((1024 * image.width()) / image.height(), 1024)
+            };
+
+            image = resize(&image, w, h, FilterType::Gaussian);
+        }
+
+        Ok(Control::Event(ImEvent::AddImage(Cell::new((
+            txt_str, txt_path, image,
+        )))))
+    })?;
+
+    Ok(Control::Unchanged)
+}
+
 fn flip_text(state: &mut Scenery, ctx: &mut GlobalState) -> Result<Control<ImEvent>, Error> {
     if !state.text_overlay.is_focused() {
         ctx.focus().focus(&state.text_overlay);
@@ -323,7 +356,7 @@ mod image {
     use crate::{GlobalState, ImEvent};
     use anyhow::Error;
     use crossterm::event::MediaKeyCode;
-    use image::ImageReader;
+    use image::RgbaImage;
     use rat_salsa_wgpu::image::{ImageArg, ImageFit, ImageHandle};
     use rat_salsa_wgpu::timer::{TimerDef, TimerHandle};
     use rat_salsa_wgpu::{Control, SalsaContext};
@@ -331,7 +364,6 @@ mod image {
     use rat_widget::focus::{FocusBuilder, FocusFlag, HasFocus};
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
-    use std::fs::read_to_string;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
@@ -469,7 +501,10 @@ mod image {
         }
 
         if let ImEvent::AddImage(im) = event {
-            event_flow!(state.add_img(im, ctx)?)
+            event_flow!({
+                let (txt, txt_path, im) = im.take();
+                state.add_img(txt, txt_path, im, ctx)?
+            })
         }
 
         if let ImEvent::TimeOut(t) = event {
@@ -508,19 +543,13 @@ mod image {
 
         pub fn add_img(
             &mut self,
-            im: &Path,
+            txt: String,
+            txt_path: PathBuf,
+            im: RgbaImage,
             ctx: &mut GlobalState,
         ) -> Result<Control<ImEvent>, Error> {
-            let txt_path = im.with_extension(".txt");
-            let txt_str = read_to_string(&txt_path).unwrap_or_default();
-
-            let image = ImageReader::open(im)?;
-            let image = image.decode()?;
-            let rgba = image.to_rgba8();
-            let rgba = rgba.into_flat_samples();
-
+            let rgba = im.into_flat_samples();
             let (_c, w, h) = rgba.extents();
-
             let h_img = ctx.terminal().borrow_mut().backend_mut().add_image(
                 &rgba.samples,
                 w as u32,
@@ -530,24 +559,24 @@ mod image {
             match self.idx {
                 None => {
                     self.images.push(h_img);
-                    self.text.push(txt_str);
-                    self.text_file.push(txt_path);
+                    self.text.push(txt.clone());
+                    self.text_file.push(txt_path.clone());
                     self.fit.push(ImageFit::FitCenter);
                     self.idx = Some(0);
                 }
                 Some(idx) if idx + 1 < self.images.len() => {
                     let fit = self.fit[idx];
                     self.images.insert(idx + 1, h_img);
-                    self.text.insert(idx + 1, txt_str);
-                    self.text_file.insert(idx + 1, txt_path);
+                    self.text.insert(idx + 1, txt.clone());
+                    self.text_file.insert(idx + 1, txt_path.clone());
                     self.fit.insert(idx + 1, fit);
                     self.idx = Some(idx + 1);
                 }
                 Some(idx) => {
                     let fit = self.fit[idx];
                     self.images.push(h_img);
-                    self.text.push(txt_str);
-                    self.text_file.push(txt_path);
+                    self.text.push(txt.clone());
+                    self.text_file.push(txt_path.clone());
                     self.fit.push(fit);
                     self.idx = Some(self.images.len() - 1);
                 }
@@ -684,6 +713,7 @@ mod image {
         pub fn pause(&mut self, ctx: &mut GlobalState) -> Result<Control<ImEvent>, Error> {
             if let Some(timer) = self.timer {
                 ctx.remove_timer(timer);
+                self.timer = None;
             }
             Ok(Control::Changed)
         }

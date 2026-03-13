@@ -19,6 +19,6 @@ ratatui = "0.30.0"
 crossterm = { version = "0.29.0" }
 
 rat-salsa-wgpu = { version = "0.10", git = "https://github.com/thscharler/rat-salsa-wgpu", features = ["dialog_widgets", "fallback_font", "fallback_symbol_font", "fallback_emoji_font"] }
-rat-widget = { version = "3.0", features = ["user_directories", "cli-clipboard"] }
+rat-widget = { version = "3.2", features = ["user_directories", "cli-clipboard"] }
 rat-theme4 = { version = "4.5" }
 
