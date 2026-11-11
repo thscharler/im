@@ -5,7 +5,7 @@ use ::image::imageops::{FilterType, resize};
 use ::image::{ImageReader, RgbaImage};
 use anyhow::Error;
 use crossterm::event::Event;
-use log::{debug, error};
+use log::error;
 use rat_salsa_wgpu::events::{CompositeWinitEvent, ConvertCrosstermEx};
 use rat_salsa_wgpu::image::ImageFit;
 use rat_salsa_wgpu::poll::{PollBlink, PollTasks, PollTimers};
