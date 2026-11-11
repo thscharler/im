@@ -5,7 +5,7 @@ use ::image::imageops::{FilterType, resize};
 use ::image::{ImageReader, RgbaImage};
 use anyhow::Error;
 use crossterm::event::Event;
-use log::error;
+use log::{debug, error};
 use rat_salsa_wgpu::events::{CompositeWinitEvent, ConvertCrosstermEx};
 use rat_salsa_wgpu::image::ImageFit;
 use rat_salsa_wgpu::poll::{PollBlink, PollTasks, PollTimers};
@@ -38,7 +38,7 @@ fn main() -> Result<(), Error> {
         .poll(PollBlink::default())
         .poll(PollTimers::new())
         .poll(PollTasks::new(2))
-        .backends("*")
+        .backends("vulkan")
         .window_title("im");
 
     let theme = create_salsa_theme("EverForest Light");
@@ -437,7 +437,7 @@ mod image {
         img_buf.render_px(
             img_handle,
             px_area,
-            ImageArg::new().fit(img_fit).clip(px_area).below_text(),
+            ImageArg::new().fit(img_fit).clip(px_area),
         );
 
         Ok(())
