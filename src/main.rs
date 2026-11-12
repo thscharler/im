@@ -6,7 +6,7 @@ use ::image::{ImageReader, RgbaImage};
 use anyhow::Error;
 use crossterm::event::Event;
 use log::error;
-use rat_salsa_wgpu::events::{CompositeWinitEvent, ConvertCrosstermEx};
+use rat_salsa_wgpu::event::{CompositeWindowEvent, WindowEventState, winit_to_crossterm_event};
 use rat_salsa_wgpu::image::ImageFit;
 use rat_salsa_wgpu::poll::{PollBlink, PollTasks, PollTimers};
 use rat_salsa_wgpu::timer::TimeOut;
@@ -34,7 +34,7 @@ fn main() -> Result<(), Error> {
     setup_logging()?;
     setup_cli_clipboard();
 
-    let run_config = RunConfig::new(ConvertCrosstermEx::new())?
+    let run_config = RunConfig::new()?
         .poll(PollBlink::default())
         .poll(PollTimers::new())
         .poll(PollTasks::new(2))
@@ -86,7 +86,7 @@ impl GlobalState {
 pub enum ImEvent {
     Noop,
     Event(Event),
-    Winit(CompositeWinitEvent),
+    Winit(CompositeWindowEvent),
     AddImage(Cell<(String, PathBuf, RgbaImage)>),
     TimeOut(TimeOut),
 }
@@ -97,14 +97,25 @@ impl From<TimeOut> for ImEvent {
     }
 }
 
+impl TryFrom<(&WindowEvent, &WindowEventState)> for ImEvent {
+    type Error = ();
+
+    fn try_from(event: (&WindowEvent, &WindowEventState)) -> Result<Self, Self::Error> {
+        winit_to_crossterm_event(event).map_or_else(
+            |_| Ok(ImEvent::Winit(event.into())),
+            |v| Ok(ImEvent::Event(v)),
+        )
+    }
+}
+
 impl From<Event> for ImEvent {
     fn from(value: Event) -> Self {
         ImEvent::Event(value)
     }
 }
 
-impl From<CompositeWinitEvent> for ImEvent {
-    fn from(value: CompositeWinitEvent) -> Self {
+impl From<CompositeWindowEvent> for ImEvent {
+    fn from(value: CompositeWindowEvent) -> Self {
         ImEvent::Winit(value)
     }
 }
