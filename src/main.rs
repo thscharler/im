@@ -7,12 +7,12 @@ use anyhow::Error;
 use crossterm::event::Event;
 use log::error;
 use rat_salsa_wgpu::event::{CompositeWindowEvent, WindowEventState, winit_to_crossterm_event};
-use rat_salsa_wgpu::image::ImageFit;
 use rat_salsa_wgpu::poll::{PollBlink, PollTasks, PollTimers};
 use rat_salsa_wgpu::timer::TimeOut;
 use rat_salsa_wgpu::{Control, RunConfig, SalsaAppContext, SalsaContext, run_tui};
 use rat_theme4::theme::SalsaTheme;
 use rat_theme4::{StyleName, WidgetStyle, create_salsa_theme};
+use rat_wgpu::image::ImageFit;
 use rat_widget::event::{Dialog, HandleEvent, Regular, TextOutcome, ct_event, event_flow};
 use rat_widget::focus::{FocusBuilder, FocusFlag, HasFocus, Navigation};
 use rat_widget::msgdialog::MsgDialogState;
@@ -35,6 +35,9 @@ fn main() -> Result<(), Error> {
     setup_cli_clipboard();
 
     let run_config = RunConfig::new()?
+        // .postprocessor(Box::new(CrtPostProcessorBuilder::new(
+        //     CrtSettings::default(),
+        // )))
         .poll(PollBlink::default())
         .poll(PollTimers::new())
         .poll(PollTasks::new(2))
@@ -368,7 +371,7 @@ mod image {
     use anyhow::Error;
     use crossterm::event::MediaKeyCode;
     use image::RgbaImage;
-    use rat_salsa_wgpu::image::{ImageArg, ImageFit, ImageHandle};
+    use rat_wgpu::image::{ImageArg, ImageFit, ImageHandle};
     use rat_salsa_wgpu::timer::{TimerDef, TimerHandle};
     use rat_salsa_wgpu::{Control, SalsaContext};
     use rat_widget::event::{ct_event, event_flow};
