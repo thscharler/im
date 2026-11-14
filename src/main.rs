@@ -13,6 +13,8 @@ use rat_salsa_wgpu::{Control, RunConfig, SalsaAppContext, SalsaContext, run_tui}
 use rat_theme4::theme::SalsaTheme;
 use rat_theme4::{StyleName, WidgetStyle, create_salsa_theme};
 use rat_wgpu::image::ImageFit;
+use rat_wgpu::postprocessor::crt::{CrtPostProcessorBuilder, CrtSettings};
+use rat_wgpu::postprocessor::default::{DefaultPostProcessor, DefaultPostProcessorBuilder};
 use rat_widget::event::{Dialog, HandleEvent, Regular, TextOutcome, ct_event, event_flow};
 use rat_widget::focus::{FocusBuilder, FocusFlag, HasFocus, Navigation};
 use rat_widget::msgdialog::MsgDialogState;
@@ -20,10 +22,12 @@ use rat_widget::text::clipboard::cli::setup_cli_clipboard;
 use rat_widget::text::{HasScreenCursor, TextStyle};
 use rat_widget::textarea::{TextArea, TextAreaState};
 use rat_widget::toolbar::{Toolbar, ToolbarKeys, ToolbarOutcome, ToolbarState};
+use ratatui::backend::Backend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::StatefulWidget;
+use std::any::Any;
 use std::cell::Cell;
 use std::fs;
 use std::fs::read_to_string;
@@ -35,9 +39,9 @@ fn main() -> Result<(), Error> {
     setup_cli_clipboard();
 
     let run_config = RunConfig::new()?
-        // .postprocessor(Box::new(CrtPostProcessorBuilder::new(
-        //     CrtSettings::default(),
-        // )))
+        .postprocessor(Box::new(CrtPostProcessorBuilder::new(
+            CrtSettings::default(),
+        )))
         .poll(PollBlink::default())
         .poll(PollTimers::new())
         .poll(PollTasks::new(2))
@@ -129,6 +133,8 @@ pub struct Scenery {
     pub text_overlay: TextAreaState,
     pub images: Images,
     pub error_dlg: MsgDialogState,
+    pub crt: bool,
+    pub scale: bool,
 }
 
 impl Default for Scenery {
@@ -138,6 +144,8 @@ impl Default for Scenery {
             text_overlay: TextAreaState::named("text"),
             images: Images::named("images"),
             error_dlg: Default::default(),
+            crt: Default::default(),
+            scale: Default::default(),
         }
     }
 }
@@ -181,17 +189,17 @@ pub fn render(
 
     let (tool, tool_popup) = Toolbar::new()
         .styles(ctx.theme.style(WidgetStyle::TOOLBAR))
-        .button("", " \u{21E7} ", false)
-        .button("", " \u{21E9} ", false)
-        .button("", " T ", false)
-        .text("  ")
+        .button("", " \u{2B05} ", false)
+        .button("", " \u{27A1} ", false)
+        .button("", " TT ", false)
+        .text(" ")
         .button("", " -- ", false)
         .button("", " \u{25B6} ", false)
         .button("", " ++ ", false)
         .text("  ")
         .button("", " \u{2716} ", false)
         .button("", " \u{2716}\u{2716} ", false)
-        .text("  ")
+        .text(" ")
         .button("", " \u{2921}\u{2922} ", false)
         .button("", " \u{2194} ", false)
         .button("", " \u{2194}\u{2195} ", false)
@@ -225,6 +233,8 @@ pub fn event(
             ct_event!(resized) => event_flow!(Control::Changed),
             ct_event!(key press CONTROL-'q') => event_flow!(Control::Quit),
             ct_event!(keycode press F(1)) => event_flow!(flip_text(state, ctx)?),
+            ct_event!(keycode press F(2)) => event_flow!(flip_crt(state, ctx)?),
+            ct_event!(keycode press F(3)) => event_flow!(flip_scale(state, ctx)?),
             _ => {}
         }
 
@@ -357,6 +367,42 @@ fn load_image(im: &Path, ctx: &mut GlobalState) -> Result<Control<ImEvent>, Erro
     Ok(Control::Unchanged)
 }
 
+fn flip_scale(state: &mut Scenery, ctx: &mut GlobalState) -> Result<Control<ImEvent>, Error> {
+    if !state.crt {
+        state.scale = !state.scale;
+
+        let terminal = ctx.terminal();
+        let mut terminal = terminal.borrow_mut();
+        let backend = terminal.backend_mut();
+
+        let pp = backend.post_processor_mut() as &mut dyn Any;
+        let pp = pp
+            .downcast_mut::<DefaultPostProcessor>()
+            .expect("default post processor");
+        pp.scale_to_window(state.scale);
+
+        _ = backend.flush();
+    }
+
+    Ok(Control::Changed)
+}
+
+fn flip_crt(state: &mut Scenery, ctx: &mut GlobalState) -> Result<Control<ImEvent>, Error> {
+    state.crt = !state.crt;
+
+    let terminal = ctx.terminal();
+    let mut terminal = terminal.borrow_mut();
+    let backend = terminal.backend_mut();
+
+    if state.crt {
+        backend.update_post_processor(&mut CrtPostProcessorBuilder::new(CrtSettings::default()));
+    } else {
+        backend.update_post_processor(&mut DefaultPostProcessorBuilder::default());
+    }
+    _ = backend.flush();
+    Ok(Control::Changed)
+}
+
 fn flip_text(state: &mut Scenery, ctx: &mut GlobalState) -> Result<Control<ImEvent>, Error> {
     if !state.text_overlay.is_focused() {
         ctx.focus().focus(&state.text_overlay);
@@ -371,9 +417,9 @@ mod image {
     use anyhow::Error;
     use crossterm::event::MediaKeyCode;
     use image::RgbaImage;
-    use rat_wgpu::image::{ImageArg, ImageFit, ImageHandle};
     use rat_salsa_wgpu::timer::{TimerDef, TimerHandle};
     use rat_salsa_wgpu::{Control, SalsaContext};
+    use rat_wgpu::image::{ImageArg, ImageFit, ImageHandle};
     use rat_widget::event::{ct_event, event_flow};
     use rat_widget::focus::{FocusBuilder, FocusFlag, HasFocus};
     use ratatui::buffer::Buffer;
