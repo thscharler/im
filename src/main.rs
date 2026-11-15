@@ -39,9 +39,6 @@ fn main() -> Result<(), Error> {
     setup_cli_clipboard();
 
     let run_config = RunConfig::new()?
-        .postprocessor(Box::new(CrtPostProcessorBuilder::new(
-            CrtSettings::default(),
-        )))
         .poll(PollBlink::default())
         .poll(PollTimers::new())
         .poll(PollTasks::new(2))
