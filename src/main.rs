@@ -7,7 +7,7 @@ use anyhow::Error;
 use crossterm::event::Event;
 use log::error;
 use rat_salsa_wgpu::event::{CompositeWindowEvent, WindowEventState, winit_to_crossterm_event};
-use rat_salsa_wgpu::poll::{PollBlink, PollTasks, PollTimers};
+use rat_salsa_wgpu::poll::{PollTasks, PollTimers};
 use rat_salsa_wgpu::timer::TimeOut;
 use rat_salsa_wgpu::{Control, RunConfig, SalsaAppContext, SalsaContext, run_tui};
 use rat_theme4::theme::SalsaTheme;
@@ -39,7 +39,6 @@ fn main() -> Result<(), Error> {
     setup_cli_clipboard();
 
     let run_config = RunConfig::new()?
-        .poll(PollBlink::default())
         .poll(PollTimers::new())
         .poll(PollTasks::new(2))
         .backends("vulkan")
